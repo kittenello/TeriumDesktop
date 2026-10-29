@@ -4,8 +4,6 @@ This guide defines repository-wide instructions for coding agents working with t
 
 Avoid building the project.
 
-If you're asked to create a Pull Request, then clearly state in PR description that it was AI generated.
-
 ## Build System Structure
 
 The build system expects this directory layout:

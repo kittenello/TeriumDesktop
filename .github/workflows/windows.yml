@@ -1,0 +1,128 @@
+name: Windows x64
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-x64-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: windows-2025
+    timeout-minutes: 360
+    env:
+      TBUILD: ${{ github.workspace }}\TBuild
+      TDESKTOP_API_ID: ${{ vars.TDESKTOP_API_ID || '2040' }}
+      TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH || 'b18441a1ff607e10a989891a5462e627' }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 4
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          path: TBuild/tdesktop
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Initialize MSVC
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installation) { throw 'Visual Studio C++ tools were not found' }
+          $vcvars = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
+          $environment = & cmd /d /s /c "`"$vcvars`" 10.0.26100.0 -vcvars_ver=14.44 >nul && set"
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC initialization failed' }
+          foreach ($entry in $environment) {
+            if ($entry -match '^([^=]+)=(.*)$') {
+              $name, $value = $Matches[1], $Matches[2]
+              if ([Environment]::GetEnvironmentVariable($name) -ne $value) {
+                "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              }
+            }
+          }
+          git config --global core.longpaths true
+          git config --global user.name github-actions
+          git config --global user.email github-actions@users.noreply.github.com
+          $modules = Get-ChildItem -Path "$env:ProgramFiles\CMake\share\cmake-*\Modules\Platform\Windows-MSVC.cmake"
+          foreach ($module in $modules) {
+            $content = [IO.File]::ReadAllText($module.FullName).Replace('${_Zi}', '')
+            [IO.File]::WriteAllText($module.FullName, $content, [Text.UTF8Encoding]::new($false))
+          }
+
+      - name: Restore build tools
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: windows-x64-tools-v1-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/prepare.py', 'TBuild/tdesktop/Telegram/build/qt_version.py') }}
+          restore-keys: windows-x64-tools-v1-
+
+      - name: Restore libraries
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.TBUILD }}\Libraries
+          key: windows-x64-libraries-v1-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/prepare.py', 'TBuild/tdesktop/Telegram/build/qt_version.py', 'TBuild/tdesktop/cmake/external/angle/qt.cmake') }}
+          restore-keys: windows-x64-libraries-v1-
+
+      - name: Prepare libraries
+        shell: cmd
+        run: call "%TBUILD%\tdesktop\Telegram\build\prepare\win.bat" skip-release silent qt6
+
+      - name: Build application
+        shell: cmd
+        working-directory: TBuild/tdesktop/Telegram
+        run: |
+          call configure.bat -G "Ninja Multi-Config" qt6 ^
+            -D TDESKTOP_API_ID=%TDESKTOP_API_ID% ^
+            -D TDESKTOP_API_HASH=%TDESKTOP_API_HASH% ^
+            -D CMAKE_CONFIGURATION_TYPES=Debug ^
+            -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
+            -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF ^
+            -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF
+          if errorlevel 1 exit /b 1
+          cmake --build ..\out --config Debug --target Telegram --parallel 4
+
+      - name: Collect portable application
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:TBUILD 'tdesktop\out\Debug'
+          $artifact = Join-Path $env:GITHUB_WORKSPACE 'artifact'
+          New-Item -ItemType Directory -Path $artifact -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $output 'AyuGram.exe') -Destination $artifact
+          Copy-Item -LiteralPath (Join-Path $output 'Updater.exe') -Destination $artifact
+          $revision = git -C "$env:TBUILD\tdesktop" rev-parse HEAD
+          "commit: $revision`nconfiguration: Debug`narchitecture: x64" | Set-Content -LiteralPath (Join-Path $artifact 'build-info.txt') -Encoding utf8
+
+      - name: Upload portable application
+        uses: actions/upload-artifact@v7
+        with:
+          name: TeriumDesktop-windows-x64
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
+
+      - name: Upload preparation diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-x64-diagnostics
+          path: |
+            ${{ env.TBUILD }}/tdesktop/out/CMakeCache.txt
+            ${{ env.TBUILD }}/tdesktop/out/CMakeFiles/CMakeConfigureLog.yaml
+            ${{ env.TBUILD }}/Libraries/win64/qt_*/config.summary
+            ${{ env.TBUILD }}/Libraries/win64/qt_*/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
+          retention-days: 7

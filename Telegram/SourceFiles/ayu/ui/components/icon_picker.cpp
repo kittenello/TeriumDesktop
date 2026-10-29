@@ -23,6 +23,7 @@ namespace {
 
 const QVector<QString> icons{
 	AyuAssets::DEFAULT_ICON,
+	AyuAssets::TERIUM_ICON,
 	AyuAssets::ALT_ICON,
 	AyuAssets::DISCORD_ICON,
 	AyuAssets::SPOTIFY_ICON,
